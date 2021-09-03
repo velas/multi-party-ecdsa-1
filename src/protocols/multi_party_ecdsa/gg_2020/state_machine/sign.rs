@@ -711,29 +711,30 @@ mod test {
                     // secret key is correct!
                     assert!((g * secret_key_1).get_element() == pk.get_element()
                         || (g * secret_key_2).get_element() == pk.get_element());
+                    println!("Secret key has been leaked to malicious party 0!")
                 }
                 sig
             })
             .all(|signature| verify(&signature, &pk, &message).is_ok()));
     }
 
-    #[test]
-    fn simulate_offline_stage_t1_n2_s2() {
-        let local_keys = simulate_keygen(1, 2);
-        simulate_offline_stage(local_keys, &[1, 2]);
-    }
-
-    #[test]
-    fn simulate_offline_stage_t1_n3_s2() {
-        let local_keys = simulate_keygen(1, 3);
-        simulate_offline_stage(local_keys, &[1, 3]);
-    }
-
-    #[test]
-    fn simulate_offline_stage_t2_n3_s3() {
-        let local_keys = simulate_keygen(2, 3);
-        simulate_offline_stage(local_keys, &[1, 2, 3]);
-    }
+    // #[test]
+    // fn simulate_offline_stage_t1_n2_s2() {
+    //     let local_keys = simulate_keygen(1, 2);
+    //     simulate_offline_stage(local_keys, &[1, 2]);
+    // }
+    //
+    // #[test]
+    // fn simulate_offline_stage_t1_n3_s2() {
+    //     let local_keys = simulate_keygen(1, 3);
+    //     simulate_offline_stage(local_keys, &[1, 3]);
+    // }
+    //
+    // #[test]
+    // fn simulate_offline_stage_t2_n3_s3() {
+    //     let local_keys = simulate_keygen(2, 3);
+    //     simulate_offline_stage(local_keys, &[1, 2, 3]);
+    // }
 
     #[test]
     fn simulate_signing_t1_n2_s2() {
@@ -757,6 +758,13 @@ mod test {
     fn simulate_signing_t2_n3_s3() {
         let local_keys = simulate_keygen(2, 3);
         let offline_stage = simulate_offline_stage(local_keys, &[1, 2, 3]);
+        simulate_signing(offline_stage, b"ZenGo")
+    }
+
+    #[test]
+    fn simulate_signing_t3_n5_s4() {
+        let local_keys = simulate_keygen(3, 5);
+        let offline_stage = simulate_offline_stage(local_keys, &[1, 3, 4, 5]);
         simulate_signing(offline_stage, b"ZenGo")
     }
 
