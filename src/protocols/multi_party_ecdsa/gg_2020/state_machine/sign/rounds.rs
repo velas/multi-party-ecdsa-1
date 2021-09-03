@@ -24,6 +24,9 @@ use gg20::party_i::{
 };
 use gg20::state_machine::keygen::LocalKey;
 use gg20::ErrorType;
+use curv::elliptic::curves::traits::ECScalar;
+
+use curv::arithmetic::traits::*;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -475,6 +478,52 @@ pub struct Round5 {
     phase5_proofs_vec: Vec<PDLwSlackProof>,
 }
 
+// z is private in the original PDLwSlackProof struct which of course is not a problem
+// for a baddie that wants to recover its value. I use an auxiliary struct for this:
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PDLwSlackProof_ {
+    z: BigInt,
+    u1: GE,
+    u2: BigInt,
+    u3: BigInt,
+    s1: BigInt,
+    s2: BigInt,
+    s3: BigInt,
+}
+
+// in groups Z*_{2^k} it's very easy to take dlogs
+// see e.g. https://crypto.stackexchange.com/a/43819
+// this method finds e such that g^e=h (mod 2^{k+2})
+pub fn dlog_in_power_of_two_group(k: usize, g: &BigInt, h: &BigInt) ->  BigInt
+{
+    let mut ans = BigInt::from(0);
+    let modulus = BigInt::from(2).pow(k as u32 + 2);
+    // let order = BigInt::from(2).pow(k as u32);
+    let mut bits = vec![];
+    for i in 0..k {
+        let j = k - i - 1;
+        let two_pow_j = BigInt::from(2).pow(j as u32);
+        let lhs = BigInt::mod_pow(&h, &two_pow_j, &modulus);
+        let rhs_exp = bits.iter().enumerate()
+            .fold(BigInt::from(0), |acc, (l, x)| {
+                let two_pow_j_plus_l = BigInt::from(2).pow((j + l) as u32);
+                if *x == 0 {acc} else {BigInt::add(&acc, &two_pow_j_plus_l)}
+            });
+        let rhs = BigInt::mod_pow(&g, &rhs_exp, &modulus);
+        if lhs.eq(&rhs)
+        {
+            bits.push(0);
+        }
+        else
+        {
+            let two_pow_i = BigInt::from(2).pow(i as u32);
+            ans = BigInt::add(&ans, &two_pow_i);
+            bits.push(1);
+        }
+    }
+    ans
+}
+
 impl Round5 {
     pub fn proceed<O>(
         self,
@@ -496,10 +545,14 @@ impl Round5 {
             .cloned()
             .map(|i| usize::from(i) - 1)
             .collect();
+
+        // a secret value of k that the malicious party will compute
+        let mut k_secret = self.sign_keys.k_i;
+
         let ttag = self.s_l.len();
         for i in 0..ttag {
             LocalSignature::phase5_verify_pdl(
-                &pdl_proof_mat_inc_me[i],
+                &pdl_proof_mat_inc_me[i].clone(),
                 &r_dash_vec[i],
                 &self.R,
                 &self.m_a_vec[i].c,
@@ -509,6 +562,23 @@ impl Round5 {
                 i,
             )
             .expect("phase5 verify pdl error");
+
+            // this is the code for malicious party
+            if self.i == 1 &&  i > 0 {
+                // malicious party gets all the proofs that used their h1_h2_N_tilde
+                let proof = pdl_proof_mat_inc_me[i][0].clone();
+                // since z is private, we have to do a little serialize/deserialize trick
+                let proof_with_public_z: PDLwSlackProof_
+                    = serde_json::from_str(&serde_json::to_string(&proof).unwrap()).unwrap();
+                // get z from the proof
+                let z = proof_with_public_z.z;
+                let h1 = self.local_key.h1_h2_n_tilde_vec[0].g.clone();
+                // find dlog of z base h1, which is actually k_i
+                let k_i_bigint = dlog_in_power_of_two_group(1023, &h1, &z);
+                // modifying k_secret
+                let k_i: FE = ECScalar::from(&k_i_bigint);
+                k_secret = k_secret.add(&k_i.get_element());
+            }
         }
         LocalSignature::phase5_check_R_dash_sum(&r_dash_vec).expect("R_dash error");
 
@@ -524,6 +594,31 @@ impl Round5 {
             receiver: None,
             body: (SI(S_i.clone()), HEGProof(homo_elgamal_proof.clone())),
         });
+
+        // malicious party just saves secret value of k in place of their gamma_i
+        // k will be used after the message is signed to recover secret key
+        if self.i == 1 {
+            let malicious_sign_keys = SignKeys {
+                w_i: self.sign_keys.w_i,
+                g_w_i: self.sign_keys.g_w_i,
+                k_i: self.sign_keys.k_i,
+                gamma_i: k_secret,
+                g_gamma_i: self.sign_keys.g_gamma_i,
+            };
+            return Ok(Round6 {
+                S_i,
+                homo_elgamal_proof,
+                s_l: self.s_l,
+                protocol_output: CompletedOfflineStage {
+                    i: self.i,
+                    local_key: self.local_key,
+                    sign_keys: malicious_sign_keys,
+                    t_vec: self.t_vec,
+                    R: self.R,
+                    sigma_i: self.sigma_i,
+                },
+            });
+        }
 
         Ok(Round6 {
             S_i,
@@ -597,7 +692,7 @@ impl Round6 {
 pub struct CompletedOfflineStage {
     i: u16,
     local_key: LocalKey,
-    sign_keys: SignKeys,
+    pub sign_keys: SignKeys,
     t_vec: Vec<GE>,
     R: GE,
     sigma_i: FE,
@@ -609,7 +704,7 @@ impl CompletedOfflineStage {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct PartialSignature(FE);
 
 pub struct Round7 {

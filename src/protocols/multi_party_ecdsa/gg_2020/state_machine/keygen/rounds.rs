@@ -10,13 +10,15 @@ use paillier::EncryptionKey;
 use round_based::containers::push::Push;
 use round_based::containers::{self, BroadcastMsgs, P2PMsgs, Store};
 use round_based::Msg;
-use zk_paillier::zkproofs::DLogStatement;
+use zk_paillier::zkproofs::{DLogStatement, CompositeDLogProof};
 
 use crate::protocols::multi_party_ecdsa::gg_2020::party_i::{
     KeyGenBroadcastMessage1, KeyGenDecommitMessage1, Keys,
 };
 use crate::protocols::multi_party_ecdsa::gg_2020::{self, ErrorType};
 use curv::elliptic::curves::traits::ECPoint;
+use curv::BigInt;
+use curv::arithmetic::traits::*;
 
 pub struct Round0 {
     pub party_i: u16,
@@ -30,8 +32,48 @@ impl Round0 {
         O: Push<Msg<gg_2020::party_i::KeyGenBroadcastMessage1>>,
     {
         let party_keys = Keys::create(self.party_i as usize);
-        let (bc1, decom1) =
+        let (mut bc1, decom1) =
             party_keys.phase1_broadcast_phase3_proof_of_correct_key_proof_of_correct_h1h2();
+        // a single malicious party chooses specific values of N_tilde, h1 and h2 for themselves
+        if self.party_i == 1 {
+            // N_tilde is chosen to be 2^1025
+            let N_tilde = BigInt::from(2).pow((1025) as u32);
+            // Euler's totient function of N_tilde, phi(N_tilde), is then 2^1024
+            let phi_N_tilde = BigInt::from(2).pow((1024) as u32);
+            // auxiliary exponent 2^1022
+            let e = BigInt::from(2).pow((1022) as u32);
+            // Group Z*_{N_tilde} is actually not cyclic so there are no generators.
+            // However, all we need are elements of large enough order, 2^1023 is sufficient
+            // to find them, we take random elements v from Z*_{phi_N_tilde} and
+            // check whether v is odd and v^{2^1022} (mod N_tilde) is not equal to 1
+            let h1 = loop {
+                let rand_val = BigInt::sample_below(&N_tilde);
+                if !rand_val.is_multiple_of(&BigInt::from(2))
+                    && BigInt::mod_pow(&rand_val, &e, &N_tilde)
+                    != BigInt::from(1) {
+                    break rand_val;
+                }
+            };
+            // h2 is 1, note that we know that h1^{phi_N_tilde} = h2 (mod N_tilde)
+            let h2 = BigInt::from(1);
+            // assembling dlog statement
+            let dlog_statement = DLogStatement {
+                N: N_tilde,
+                g: h1,
+                ni: h2,
+            };
+            // we correctly prove the dlog statement
+            let composite_dlog_proof = CompositeDLogProof::prove(&dlog_statement,
+                                                                 &phi_N_tilde);
+            // finally, we inject dlog statement and proof we just tinkered into our bc1 message
+            bc1 = KeyGenBroadcastMessage1 {
+                e: bc1.e.clone(),
+                dlog_statement,
+                com: bc1.com.clone(),
+                correct_key_proof: bc1.correct_key_proof.clone(),
+                composite_dlog_proof,
+            };
+        }
 
         output.push(Msg {
             sender: self.party_i.clone(),
@@ -260,7 +302,7 @@ impl Round4 {
         let h1_h2_n_tilde_vec = self
             .bc_vec
             .iter()
-            .map(|bc1| bc1.dlog_statement_base_h1.clone())
+            .map(|bc1| bc1.dlog_statement.clone())
             .collect::<Vec<DLogStatement>>();
 
         let (head, tail) = self.y_vec.split_at(1);

@@ -34,6 +34,8 @@ use crate::utilities::mta::MessageA;
 use crate::protocols::multi_party_ecdsa::gg_2020 as gg20;
 use gg20::party_i::{SignBroadcastPhase1, SignDecommitPhase1, SignatureRecid};
 use gg20::state_machine::keygen::LocalKey;
+use curv::arithmetic::traits::*;
+
 
 mod fmt;
 mod rounds;
@@ -634,6 +636,8 @@ mod test {
     use super::*;
     use gg20::party_i::verify;
     use gg20::state_machine::keygen::test::simulate_keygen;
+    use curv::elliptic::curves::traits::{ECScalar, ECPoint};
+    use curv::elliptic::curves::secp256_k1::{Secp256k1Scalar, Secp256k1Point};
 
     fn simulate_offline_stage(
         local_keys: Vec<LocalKey>,
@@ -684,7 +688,32 @@ mod test {
         assert!(parties
             .into_iter()
             .enumerate()
-            .map(|(i, p)| p.complete(&local_sigs_except(i)).unwrap())
+            .map(|(i, p)| {
+                let sig = p.complete(&local_sigs_except(i)).unwrap();
+                // for corrupted party
+                if i == 0 {
+                    // now that the signature is finished, our malicious party can recover the secret
+                    let r_inv = ECScalar::invert(&sig.r);
+                    let msg: Secp256k1Scalar = ECScalar::from(&message);
+                    // recall that we saved secret value of k in sign_keys.gamma_i
+                    let k = offline[0].sign_keys.gamma_i;
+                    let k_inv = ECScalar::invert(&k);
+
+                    let g: Secp256k1Point = ECPoint::generator();
+                    let zero: Secp256k1Scalar = ECScalar::zero();
+
+                    // now, knowing k, message and its signature, we can recover secret key
+                    // see e.g. https://crypto.stackexchange.com/a/57851
+                    let secret_key_1 = ((k_inv * sig.s).sub(&msg.get_element())) * r_inv;
+                    // either s or -s will give us correct secret key
+                    let minus_s = zero.sub(&sig.s.get_element());
+                    let secret_key_2 = ((k_inv * minus_s).sub(&msg.get_element())) * r_inv;
+                    // secret key is correct!
+                    assert!((g * secret_key_1).get_element() == pk.get_element()
+                        || (g * secret_key_2).get_element() == pk.get_element());
+                }
+                sig
+            })
             .all(|signature| verify(&signature, &pk, &message).is_ok()));
     }
 
@@ -713,21 +742,43 @@ mod test {
         simulate_signing(offline_stage, b"ZenGo")
     }
 
-    #[test]
-    fn simulate_signing_t1_n3_s2() {
-        let local_keys = simulate_keygen(1, 3);
-        let offline_stage = simulate_offline_stage(local_keys.clone(), &[1, 2]);
-        simulate_signing(offline_stage, b"ZenGo");
-        let offline_stage = simulate_offline_stage(local_keys.clone(), &[1, 3]);
-        simulate_signing(offline_stage, b"ZenGo");
-        let offline_stage = simulate_offline_stage(local_keys.clone(), &[2, 3]);
-        simulate_signing(offline_stage, b"ZenGo");
-    }
+    // #[test]
+    // fn simulate_signing_t1_n3_s2() {
+    //     let local_keys = simulate_keygen(1, 3);
+    //     let offline_stage = simulate_offline_stage(local_keys.clone(), &[1, 2]);
+    //     simulate_signing(offline_stage, b"ZenGo");
+    //     let offline_stage = simulate_offline_stage(local_keys.clone(), &[1, 3]);
+    //     simulate_signing(offline_stage, b"ZenGo");
+    //     let offline_stage = simulate_offline_stage(local_keys.clone(), &[2, 3]);
+    //     simulate_signing(offline_stage, b"ZenGo");
+    // }
 
     #[test]
     fn simulate_signing_t2_n3_s3() {
         let local_keys = simulate_keygen(2, 3);
         let offline_stage = simulate_offline_stage(local_keys, &[1, 2, 3]);
         simulate_signing(offline_stage, b"ZenGo")
+    }
+
+    #[test]
+    fn test_dlog_solver() {
+        // setting the stage
+        let n = 1025;
+        let pow_of_two_modulus = BigInt::from(2).pow(n as u32);
+        let e = BigInt::from(2).pow(n as u32 - 3);
+        let g = loop {
+            let rand_val = BigInt::sample_below(&pow_of_two_modulus);
+            if !rand_val.is_multiple_of(&BigInt::from(2))
+                && BigInt::mod_pow(&rand_val, &e, &pow_of_two_modulus)
+                != BigInt::from(1) {
+                break rand_val;
+            }
+        };
+        let exp = BigInt::sample_below(&BigInt::from(2).pow(n as u32 - 2));
+        let h = BigInt::mod_pow(&g, &exp, &pow_of_two_modulus);
+
+        // test method
+        let res = dlog_in_power_of_two_group(n as usize - 2, &g, &h);
+        assert_eq!(res, exp);
     }
 }
